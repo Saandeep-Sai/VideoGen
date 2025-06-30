@@ -1,0 +1,12 @@
+.env
+.venv
+*.mp4
+*.avi
+*.mov
+*.wmv
+*.flv
+*.mkv
+media/
+generated_videos/
+pycache/
+__pycache__/
