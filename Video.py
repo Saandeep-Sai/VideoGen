@@ -397,23 +397,40 @@ class EnhancedVideoGenerator:
     
     def fix_manim_script(self, script: str) -> str:
         """
-        Patch known Manim syntax issues and prevent text overflow in generated scripts.
+        Patch known Manim syntax issues and prevent text overflow or runtime errors.
         """
-        # Fix list.animate -> looped individual animation
+
+        import re
+
+        # ✅ Fix list.animate errors
         script = re.sub(
             r'rects\[(.*?)\:(.*?)\]\.animate\.set_color\((.*?)\)',
             r'[rect.animate.set_color(\3) for rect in rects[\1:\2]]',
             script
         )
-        
-        # Fix broken inline if-else list comprehensions
+
+        # ✅ Fix broken inline if-else list comprehensions
         script = re.sub(
             r"self\.play\(\*\[FadeOut\(obj\) for obj in \[(.*?)\] if 'success_text' in locals\(\) else \[(.*?)\]\]\)",
             r"objects_to_fade = [\1] if 'success_text' in locals() else [\2]\n        self.play(*[FadeOut(obj) for obj in objects_to_fade])",
             script
         )
-        
-        # Replace SVGMobject references with a fallback Rectangle
+
+        # ✅ Replace unknown `Checkmark(...)` calls with ✓
+        script = re.sub(
+            r'Checkmark\(.*?color\s*=\s*([^)]+)\)',
+            r'Text("✓", color=\1, font_size=48)',
+            script
+        )
+
+        # ✅ Replace other unknown symbols like Cross, Tick, etc.
+        script = re.sub(
+            r'Cross\(.*?\)',
+            r'Text("✗", font_size=48)',
+            script
+        )
+
+        # ✅ Replace SVGMobject (external file references)
         script = re.sub(
             r'SVGMobject\("([^"]+)"\)\.scale\((.*?)\)',
             r'Rectangle(width=2, height=2, color=WHITE, fill_opacity=0.5).scale(\2)',
@@ -424,71 +441,115 @@ class EnhancedVideoGenerator:
             r'Rectangle(width=2, height=2, color=WHITE, fill_opacity=0.5)',
             script
         )
-        
-        # Fix method chaining issues
+
+        # ✅ Fix method chaining typos (redundant .shift)
         script = re.sub(
             r'FadeIn\((.*?)\)\.shift\((.*?)\)',
             r'FadeIn(\1).shift(\2)',
             script
         )
+
+        # ✅ Fix .move_to(..., buff=...) -> separate .next_to() logic
         script = re.sub(
-            r'FadeTo\((.*?)\)\.shift\((.*?)\)',
-            r'FadeTo(\1).shift(\2)',
+            r'(\w+)\.move_to\(([^,]+),\s*buff\s*=\s*([^)]+)\)',
+            r'\1.move_to(\2)\n\1.next_to(\2, buff=\3)',
             script
         )
-        
-        # Ensure positive wait times
+        # Fix move_to(..., buff=...) → separate move_to + next_to
+        script = re.sub(
+            r'(\w+)\.move_to\(([^,]+),\s*buff\s*=\s*([^)]+)\)',
+            r'\1.move_to(\2)\n\1.next_to(\2, buff=\3)',
+            script
+        )
+
+
+        # ✅ Ensure wait times are valid (non-negative, min 0.1)
         script = re.sub(
             r'self\.wait\((.*?)\)',
             lambda m: f'self.wait({max(float(m.group(1)), 0.1)})' if m.group(1).replace('.', '', 1).isdigit() else m.group(0),
             script
         )
-        
-        # Cap font_size to prevent overflow
+
+        # ✅ Cap Text font_size and add width
         script = re.sub(
             r'Text\((.*?),\s*font_size\s*=\s*(\d+\.?\d*)\s*(.*?)\)',
             lambda m: f'Text({m.group(1)}, font_size=min({m.group(2)}, 36){m.group(3)})',
             script
         )
-        
-        # Add text wrapping for long text
+
         script = re.sub(
             r'Text\((.*?),\s*font_size\s*=\s*min\((\d+\.?\d*),\s*36\)\s*(.*?)\)',
             r'Text(\1, font_size=min(\2, 36), width=7.0\3)',
             script
         )
 
-        # Remove duplicate width keyword arguments in Text(...)
+        # ✅ Remove duplicate `width=` keywords in Text()
         def remove_duplicate_widths(match):
             args = match.group(1)
-            # Remove all width=... except the last one
             parts = re.split(r',(?![^(]*\))', args)
             width_indices = [i for i, p in enumerate(parts) if re.match(r'\s*width\s*=', p)]
             if len(width_indices) > 1:
-                # Keep only the last width
                 for idx in reversed(width_indices[:-1]):
                     del parts[idx]
             return f'Text({", ".join(parts)})'
+
         script = re.sub(
             r'Text\(([^)]*width\s*=[^)]*)\)',
             remove_duplicate_widths,
             script
         )
-        
-        # Adjust positioning to keep text within frame
+
+        # ✅ Fix .to_edge(...) → apply safe padding
         script = re.sub(
             r'\.to_edge\((.*?)\)',
-            r'.move_to(\1 * 0.9)',  # Scale down edge positioning to add padding
+            r'.move_to(\1 * 0.9)',
             script
         )
+
+        # ✅ Fix .shift(... * N) to cap shift distance
         script = re.sub(
             r'\.shift\((.*?)\s*\*\s*([\d.]+)\)',
-            lambda m: f'.shift({m.group(1)} * min({m.group(2)}, 3.0))',  # Cap shift distance
+            lambda m: f'.shift({m.group(1)} * min({m.group(2)}, 3.0))',
             script
         )
-        
+        # Ensure font_size capped and width added for all Text() calls
+        script = re.sub(
+            r'Text\(([^)]*?)\)',
+            lambda m: (
+                m.group(0)
+                if 'font_size=' in m.group(1) and 'width=' in m.group(1)
+                else (
+                    f'Text({m.group(1)}, font_size=min(32, 36), width=7.0)'
+                    if 'font_size=' not in m.group(1)
+                    else f'Text({m.group(1)}, width=7.0)'
+                )
+            ),
+            script
+        )
+        # Remove width=... from inside any min(...) calls
+        script = re.sub(
+            r'min\(\s*([0-9.]+)\s*,\s*36\s*,\s*width\s*=\s*[0-9.]+\s*\)',
+            r'min(\1, 36)',
+            script
+        )
+
+       
+
+       
+        # ✅ Replace fancy characters (Unicode → ASCII-safe)
+        replacements = {
+            "→": "->",
+            "—": "--",
+            "“": '"', "”": '"',
+            "‘": "'", "’": "'",
+            "…": "...",
+        }
+        for k, v in replacements.items():
+            script = script.replace(k, v)
+
         return script
-    
+
+
     def suggest_voice_for_topic(self, topic: str, level: str = "beginner") -> str:
         """Suggest the best voice configuration for a given topic and level."""
         topic_lower = topic.lower()
@@ -669,66 +730,139 @@ class EnhancedVideoGenerator:
         
         try:
             response = self.gemini.generate_content(f"""
-                    You are an expert AI educator and visual storyteller.
+            
+IMPORTANT CODING INSTRUCTIONS FOR GEMINI (Manim v0.19.0 + Python 3.11) ⚠️
 
-                    OBJECTIVE:
-                    Create BOTH a Manim script AND synchronized narration segments for a video on the topic: "{topic}", with a total runtime of approximately {duration} seconds. The start time of an audio file should not overlap with the end time of the previous audio file. The total duration of the video should be {duration} seconds.
-                    
-                    REQUIREMENTS:
+You are tasked with generating a 100% error-free Manim Python animation script AND synchronized narration segments, based on a given topic. Manim must run successfully in version 0.19.0 using Python 3.11. Follow these exact rules to avoid all common runtime and syntax errors.
 
-                    1. Narration Segments:
-                    - Cover the entire {duration}-second video with continuous narration
-                    - Use slow, clear speech (around 100–120 words per minute)
-                    - Break narration into segments of required seconds each for readability and realism
-                    - Give expressions while narrating, to increase engagement. These expressions should be placed in square brackets like this: [expression]
-                    - Format each line like:
-                    SEGMENT: start_time | duration | narration text
-                    - Each narration segment must directly describe what's happening on screen
-                    - Ensure start_time of each segment equals the sum of durations of previous segments to avoid gaps
+==================
+🧠 OBJECTIVE
+==================
+Generate BOTH:
+1. A complete Manim animation Python script using class name: `GeneratedAnimation`
+2. A set of narration segments, formatted properly and synchronized with video
 
-                    2. Manim Script:
-                    - Must be complete Python code using the class name: GeneratedAnimation
-                    - Begin with: from manim import *
-                    - Do not use Charmap
-                    - There should be no overlapping visuals
-                    - Do NOT use SVGMobject or reference external files (e.g., .svg, .png)
-                    - Use only built-in Manim objects like Text, Rectangle, Circle, etc.
-                    - Based on the timing of the narration segments, write the Python code to create the animations
-                    - Include a title scene, key explanations, animations, and a summary
-                    - Use `self.wait(duration)` statements to match narration timing
-                    - Animation should take place for each segment of narration and last until the end of the narration segment
-                    - Use `FadeOut()` to remove old elements before adding new ones — avoid overlapping visuals
-                    - Prefer 1080p visual clarity, with 2–3 items on screen at once (maximum)
-                    - Use these colors for clarity:
-                        - BLUE: Titles and headings
-                        - GREEN: Key concepts or steps
-                        - RED: Warnings or common errors
-                    - Ensure animations are synchronized with narration segments
-                    - Use advanced Manim features for engaging visuals
-                    - Ensure the script is visually appealing and maximizes educational impact
-                    - Use only valid Manim API methods. No pseudo-code or placeholders.
-                    - Prefer named helper functions (e.g., `create_number_line()`) if repeating structures
-                    - Ensure wait times are positive (minimum 0.1 seconds)
-                    - Use valid UTF-8 characters only, no emojis or special characters
-                    - Use `Text` objects with `font_size` capped at 36 to prevent overflow
+==================
+📚 TOPIC INPUT FORMAT
+==================
+You will receive the topic as: "{topic}"
+The total duration will be: {duration} seconds.
 
-                    ⚠️ Strict Rules to Avoid Errors:
-                    - Never use `.center`, `.height`, `.width` — use `.get_center()`, `.get_height()`, `.get_width()`
-                    - Do NOT use SVGMobject or reference external files
-                    - Avoid overlapping visuals. Remove previous elements using `FadeOut()`.
-                    - Ensure all wait times are positive numbers
-                    - Ensure animations match narration timing exactly
-                    - Ensure text is constrained to prevent overflow
+==================
+🎙️ NARRATION RULES
+==================
+1. Narration must fully cover the {duration} seconds with no gaps or overlaps.
+2. Use slow, clear language (~100–120 words per minute).
+3. Add expressive emotions in brackets: [Excited], [Thoughtful], [Emphasize], etc.
+4. Format narration like this (exactly):
 
-                    📦 Output Format:
-                    Respond in this exact format and nothing else:
+SEGMENT: start_time | duration | narration text
 
-                    ---NARRATION---
-                    <SEGMENT: start | duration | text lines>
-                    ---MANIM---
-                    <full Manim Python code here>
+(Example)
+SEGMENT: 0 | 6 | [Confident] Let’s explore the basics of Third Normal Form.
+SEGMENT: 6 | 4 | [Curious] Why is normalization important in databases?
+
+5. Each `start_time` must be the sum of all previous durations (no floating-point errors).
+6. Keep narration human, clear, and simple. Every segment must describe the animation shown.
+
+==================
+🎬 MANIM CODE RULES
+==================
+
+--- IMPORTS ---
+• Use ONLY this import (no aliases, no other modules):
+```python
+from manim import *
+```
+
+--- CLASS & STRUCTURE ---
+• Class name must be: `GeneratedAnimation`
+• Define helper functions where appropriate (e.g., `create_table()`)
+• Script must run without edits in Manim v0.19.0
+
+--- ALLOWED OBJECTS ---
+✅ Use only these built-in Manim mobjects:
+- Text
+- Rectangle, Circle, Line, Arrow, DashedLine
+- VGroup, Group
+- Table (only if correctly used)
+❌ DO NOT use:
+- SVGMobject, Checkmark, Cross, or custom symbols
+- External files (.svg, .png, etc.)
+
+--- TEXT RULES ---
+1. Every `Text(...)` must use this format exactly:
+```python
+Text("Some Text", font_size=min(N, 36), color=COLOR)
+```
+• N must be a numeric value ≤ 36 (e.g., 28, 32)
+• Do NOT pass other named arguments inside `min(...)` (e.g., `min(32, 36, width=7.0)` is INVALID)
+• Use colors like: BLUE, GREEN, RED, YELLOW, WHITE
+
+2. NEVER let text overlap or overflow.
+• Prefer shorter text and use `next_to()` for spacing.
+• Maximum of 2–3 elements on screen at once.
+
+--- POSITIONING RULES ---
+• Never use:
+```python
+mobject.move_to(position, buff=...)
+```
+• Instead, always separate position and buffer:
+```python
+element.move_to(position)
+element.next_to(other_element, direction, buff=0.3)
+```
+
+--- TABLE RULES ---
+• Use this helper function definition for all tables:
+```python
+def create_table(headers: List[str], data: List[List[str]], title_text: str) -> VGroup:
+```
+• Only use the built-in `Table` class properly.
+• Each row must be the same length (no ragged data).
+• Never use keyword arguments like `include_header_line` unless confirmed supported.
+
+--- ANIMATION SYNC ---
+• Use `self.wait(duration)` after every animation to match narration segment.
+• Duration must match narration segment duration exactly.
+• Use `FadeOut(...)` before adding new content to avoid overlap.
+• Avoid long animation chains unless necessary.
+
+--- CODING SAFETY RULES ---
+• Donot use argument include_header in MObjects __init__ methods
+• NEVER perform math on strings (e.g., `"5" ** 2` is invalid)
+• Always use `int(...)` or `float(...)` before math ops.
+• Do NOT use unsupported `min(...)` with extra args (e.g., width, height)
+• Do NOT use `**kwargs` with classes unless verified.
+• All durations passed to `self.wait()` must be ≥ 0.1
+• Avoid calling attributes like `.center`, `.height`, `.width` — use `.get_center()`, etc.
+
+==================
+✅ OUTPUT FORMAT (MUST FOLLOW)
+==================
+
+---NARRATION---
+SEGMENT: start | duration | narration text
+SEGMENT: ...
+
+---MANIM---
+from manim import *
+
+class GeneratedAnimation(Scene):
+    def construct(self):
+        # Manim animation code here
+
+==================
+IF YOU BREAK ANY RULE ABOVE, THE SCRIPT WILL FAIL TO EXECUTE.
+==================
+
+Be clean, strict, and follow instructions with full accuracy.
+
                     """)
-
+            print("=" * 60)
+            print("AI: Content generation response received")
+            print(response.text)
             content = response.text.strip()
             
             if "---MANIM---" not in content or "---NARRATION---" not in content:
@@ -741,8 +875,7 @@ class EnhancedVideoGenerator:
                 manim_script = manim_script[manim_script.find('\n') + 1:]
             if manim_script.endswith("```"):
                 manim_script = manim_script[:manim_script.rfind("```")]
-            print("🔧 Cleaning up Manim script...")
-            manim_script = self.fix_manim_script(manim_script)
+
             print(manim_script)
             if "from manim import *" not in manim_script:
                 manim_script = "from manim import *\n\n" + manim_script
@@ -769,6 +902,8 @@ class EnhancedVideoGenerator:
             
             if not narration_segments:
                 raise ValueError("No valid narration segments parsed")
+            print("🔧 Cleaning up Manim script...")
+            manim_script = self.fix_manim_script(manim_script)
             
             total_duration = sum(segment["duration"] for segment in narration_segments)
             if abs(total_duration - duration) > 1.0:
@@ -885,7 +1020,7 @@ class GeneratedAnimation(Scene):
                 except Exception as e:
                     print(f"⚠️  Could not remove existing script file {script_path}: {e}")
             
-            with open(script_path, 'w') as f:
+            with open(script_path, 'w',encoding='utf-8') as f:
                 f.write(manim_script)
             
             quality_flag = quality_flags.get(quality, "-qh")
