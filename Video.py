@@ -16,6 +16,10 @@ from pydub.playback import play
 from pydub.utils import mediainfo
 import threading
 import sys
+import logging
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 # Fix Windows encoding issues
 if sys.platform == "win32":
@@ -31,7 +35,6 @@ except ImportError:
     CHATTERBOX_AVAILABLE = False
 
 load_dotenv()
-
 class EnhancedVideoGenerator:
     """
     Enhanced automated video generation system with local Chatterbox-TTS integration
@@ -396,17 +399,19 @@ class EnhancedVideoGenerator:
         return str(audio_path)
     
     def fix_manim_script(self, script: str) -> str:
-        """
-        Patch known Manim syntax issues and prevent text overflow or runtime errors.
-        """
+        logging.info("🧹 Starting Manim script cleanup...")
 
-        import re
-
-        # ✅ Fix list.animate errors
+        # ✅ Fix list slice animate color set
         script = re.sub(
             r'rects\[(.*?)\:(.*?)\]\.animate\.set_color\((.*?)\)',
             r'[rect.animate.set_color(\3) for rect in rects[\1:\2]]',
             script
+        )
+        script = re.sub(
+            r'^[ \t]{12,}(.*)$',   # lines indented more than 12 spaces (3+ tabs or 12+ spaces)
+            r'        \1',         # reduce indent to 8 spaces (typical inside def construct)
+            script,
+            flags=re.MULTILINE
         )
 
         # ✅ Fix broken inline if-else list comprehensions
@@ -416,103 +421,60 @@ class EnhancedVideoGenerator:
             script
         )
 
-        # ✅ Replace unknown `Checkmark(...)` calls with ✓
-        script = re.sub(
-            r'Checkmark\(.*?color\s*=\s*([^)]+)\)',
-            r'Text("✓", color=\1, font_size=48)',
-            script
-        )
+        # ✅ Replace Checkmark with ✓, Cross with ✗
+        script = re.sub(r'Checkmark\(.*?color\s*=\s*([^)]+)\)', r'Text("✓", color=\1, font_size=48)', script)
+        script = re.sub(r'Cross\(.*?\)', r'Text("✗", font_size=48)', script)
 
-        # ✅ Replace other unknown symbols like Cross, Tick, etc.
-        script = re.sub(
-            r'Cross\(.*?\)',
-            r'Text("✗", font_size=48)',
-            script
-        )
+        # ✅ Replace SVGMobject
+        script = re.sub(r'SVGMobject\("([^"]+)"\)\.scale\((.*?)\)', r'Rectangle(width=2, height=2, color=WHITE, fill_opacity=0.5).scale(\2)', script)
+        script = re.sub(r'SVGMobject\("([^"]+)"\)', r'Rectangle(width=2, height=2, color=WHITE, fill_opacity=0.5)', script)
 
-        # ✅ Replace SVGMobject (external file references)
-        script = re.sub(
-            r'SVGMobject\("([^"]+)"\)\.scale\((.*?)\)',
-            r'Rectangle(width=2, height=2, color=WHITE, fill_opacity=0.5).scale(\2)',
-            script
-        )
-        script = re.sub(
-            r'SVGMobject\("([^"]+)"\)',
-            r'Rectangle(width=2, height=2, color=WHITE, fill_opacity=0.5)',
-            script
-        )
+        # ✅ Fix move_to(..., buff=...) → move_to(...) + next_to(..., buff)
+        script = re.sub(r'(\w+)\.move_to\(([^,]+),\s*buff\s*=\s*([^)]+)\)', r'\1.move_to(\2)\n\1.next_to(\2, buff=\3)', script)
 
-        # ✅ Fix method chaining typos (redundant .shift)
-        script = re.sub(
-            r'FadeIn\((.*?)\)\.shift\((.*?)\)',
-            r'FadeIn(\1).shift(\2)',
-            script
-        )
+        # ✅ Fix .to_edge(...) → .move_to(... * 0.9)
+        script = re.sub(r'\.to_edge\((.*?)\)', r'.move_to(\1 * 0.9)', script)
 
-        # ✅ Fix .move_to(..., buff=...) -> separate .next_to() logic
-        script = re.sub(
-            r'(\w+)\.move_to\(([^,]+),\s*buff\s*=\s*([^)]+)\)',
-            r'\1.move_to(\2)\n\1.next_to(\2, buff=\3)',
-            script
-        )
-        # Fix move_to(..., buff=...) → separate move_to + next_to
-        script = re.sub(
-            r'(\w+)\.move_to\(([^,]+),\s*buff\s*=\s*([^)]+)\)',
-            r'\1.move_to(\2)\n\1.next_to(\2, buff=\3)',
-            script
-        )
+        # ✅ Fix .shift(... * N) cap
+        script = re.sub(r'\.shift\((.*?)\s*\*\s*([\d.]+)\)', lambda m: f'.shift({m.group(1)} * min({m.group(2)}, 3.0))', script)
 
+        # ✅ Replace wrong directions (RIGTH → RIGHT, UPP → UP)
+        wrong_dirs = {'RIGTH': 'RIGHT', 'LEFFT': 'LEFT', 'UPP': 'UP', 'DOWNN': 'DOWN'}
+        for wrong, correct in wrong_dirs.items():
+            script = re.sub(rf'\b{wrong}\b', correct, script)
 
-        # ✅ Ensure wait times are valid (non-negative, min 0.1)
+        # ✅ Fix .wait(...) with invalid times
         script = re.sub(
             r'self\.wait\((.*?)\)',
             lambda m: f'self.wait({max(float(m.group(1)), 0.1)})' if m.group(1).replace('.', '', 1).isdigit() else m.group(0),
             script
         )
 
-        # ✅ Cap Text font_size and add width
+        # ✅ Fix Table(...) include_header
+        script = re.sub(r'Table\((.*?)include_header\s*=\s*True\s*,?', r'Table(\1', script)
+
+        # ✅ Remove width inside min()
+        script = re.sub(r'min\(\s*([0-9.]+)\s*,\s*36\s*,\s*width\s*=\s*[0-9.]+\s*\)', r'min(\1, 36)', script)
+
+        # ✅ Ensure font_size capped and width added
         script = re.sub(
             r'Text\((.*?),\s*font_size\s*=\s*(\d+\.?\d*)\s*(.*?)\)',
             lambda m: f'Text({m.group(1)}, font_size=min({m.group(2)}, 36){m.group(3)})',
             script
         )
-
+        # ✅ Remove width argument from min() if present
         script = re.sub(
-            r'Text\((.*?),\s*font_size\s*=\s*min\((\d+\.?\d*),\s*36\)\s*(.*?)\)',
-            r'Text(\1, font_size=min(\2, 36), width=7.0\3)',
+            r'min\(([^)]*?),\s*width\s*=\s*[^,)]+(,[^)]*)?\)',
+            lambda m: f"min({','.join([p for p in m.group(1).split(',') if 'width=' not in p])}, 36)",
             script
         )
 
-        # ✅ Remove duplicate `width=` keywords in Text()
-        def remove_duplicate_widths(match):
-            args = match.group(1)
-            parts = re.split(r',(?![^(]*\))', args)
-            width_indices = [i for i, p in enumerate(parts) if re.match(r'\s*width\s*=', p)]
-            if len(width_indices) > 1:
-                for idx in reversed(width_indices[:-1]):
-                    del parts[idx]
-            return f'Text({", ".join(parts)})'
-
+        # ✅ Inject width=7.0 if not present after font_size=min(...)
         script = re.sub(
-            r'Text\(([^)]*width\s*=[^)]*)\)',
-            remove_duplicate_widths,
-            script
-        )
+            r'Text\((.*?),\s*font_size\s*=\s*min\((\d+\.?\d*),\s*36\)(.*?)\)',
+            r'Text(\1, font_size=min(\2, 36), width=7.0\3)', script)
 
-        # ✅ Fix .to_edge(...) → apply safe padding
-        script = re.sub(
-            r'\.to_edge\((.*?)\)',
-            r'.move_to(\1 * 0.9)',
-            script
-        )
-
-        # ✅ Fix .shift(... * N) to cap shift distance
-        script = re.sub(
-            r'\.shift\((.*?)\s*\*\s*([\d.]+)\)',
-            lambda m: f'.shift({m.group(1)} * min({m.group(2)}, 3.0))',
-            script
-        )
-        # Ensure font_size capped and width added for all Text() calls
+        # ✅ Add width and font_size if missing
         script = re.sub(
             r'Text\(([^)]*?)\)',
             lambda m: (
@@ -526,27 +488,36 @@ class EnhancedVideoGenerator:
             ),
             script
         )
-        # Remove width=... from inside any min(...) calls
-        script = re.sub(
-            r'min\(\s*([0-9.]+)\s*,\s*36\s*,\s*width\s*=\s*[0-9.]+\s*\)',
-            r'min(\1, 36)',
-            script
-        )
 
-       
+        # ✅ Remove duplicate `width=` in Text()
+        def remove_duplicate_widths(match):
+            args = match.group(1)
+            parts = re.split(r',(?![^()]*\))', args)
+            width_indices = [i for i, p in enumerate(parts) if re.match(r'\s*width\s*=', p)]
+            if len(width_indices) > 1:
+                for idx in reversed(width_indices[:-1]):
+                    del parts[idx]
+            return f'Text({", ".join(parts)})'
 
-       
+        script = re.sub(r'Text\(([^)]*width\s*=[^)]*)\)', remove_duplicate_widths, script)
+
         # ✅ Replace fancy characters (Unicode → ASCII-safe)
         replacements = {
-            "→": "->",
-            "—": "--",
-            "“": '"', "”": '"',
-            "‘": "'", "’": "'",
-            "…": "...",
+            "→": "->", "—": "--", "“": '"', "”": '"',
+            "‘": "'", "’": "'", "…": "...", "✓": "✓", "✗": "✗"
         }
         for k, v in replacements.items():
             script = script.replace(k, v)
 
+        # ✅ Inject typing imports if missing
+        if "create_table(" in script and "from typing import" not in script:
+            script = "from typing import List, Any\n" + script# ✅ Fix color=" BLUE" → color=BLUE
+        
+        script = re.sub(r'color\s*=\s*["\']\s*(BLUE|RED|GREEN|WHITE|BLACK|YELLOW|ORANGE)\s*["\']', r'color=\1', script)
+
+        
+
+        logging.info("✅ Manim script cleanup complete.")
         return script
 
 
@@ -729,137 +700,143 @@ class EnhancedVideoGenerator:
         print(f"AI: Generating synchronized content for: {topic}")
         
         try:
+            print("AI: Sending request to Gemini for content generation...")
             response = self.gemini.generate_content(f"""
-            
-IMPORTANT CODING INSTRUCTIONS FOR GEMINI (Manim v0.19.0 + Python 3.11) ⚠️
+            IMPORTANT CODING INSTRUCTIONS FOR GEMINI (Manim v0.19.0 + Python 3.11) ⚠️
 
-You are tasked with generating a 100% error-free Manim Python animation script AND synchronized narration segments, based on a given topic. Manim must run successfully in version 0.19.0 using Python 3.11. Follow these exact rules to avoid all common runtime and syntax errors.
+            You are tasked with generating a 100% error-free Manim Python animation script AND synchronized narration segments, based on a given topic. Manim must run successfully in version 0.19.0 using Python 3.11. Follow these exact rules to avoid all common runtime and syntax errors.
 
-==================
-🧠 OBJECTIVE
-==================
-Generate BOTH:
-1. A complete Manim animation Python script using class name: `GeneratedAnimation`
-2. A set of narration segments, formatted properly and synchronized with video
+            ==================
+            🧠 OBJECTIVE
+            ==================
+            Generate BOTH:
+            1. A complete Manim animation Python script using class name: `GeneratedAnimation`
+            2. A set of narration segments, formatted properly and synchronized with video
 
-==================
-📚 TOPIC INPUT FORMAT
-==================
-You will receive the topic as: "{topic}"
-The total duration will be: {duration} seconds.
+            ==================
+            📚 TOPIC INPUT FORMAT
+            ==================
+            You will receive the topic as: "{topic}"
+            The total duration will be: {duration} seconds.
 
-==================
-🎙️ NARRATION RULES
-==================
-1. Narration must fully cover the {duration} seconds with no gaps or overlaps.
-2. Use slow, clear language (~100–120 words per minute).
-3. Add expressive emotions in brackets: [Excited], [Thoughtful], [Emphasize], etc.
-4. Format narration like this (exactly):
+            ==================
+            🎙️ NARRATION RULES
+            ==================
+            1. Narration must fully cover the {duration} seconds with no gaps or overlaps.
+            2. Use slow, clear language (~100–120 words per minute).
+            3. Add expressive emotions in brackets: [Excited], [Thoughtful], [Emphasize], etc.
+            4. Format narration like this (exactly):
 
-SEGMENT: start_time | duration | narration text
+            SEGMENT: start_time | duration | narration text
 
-(Example)
-SEGMENT: 0 | 6 | [Confident] Let’s explore the basics of Third Normal Form.
-SEGMENT: 6 | 4 | [Curious] Why is normalization important in databases?
+            (Example)
+            SEGMENT: 0 | 6 | [Confident] Let’s explore the basics of Third Normal Form.
+            SEGMENT: 6 | 4 | [Curious] Why is normalization important in databases?
 
-5. Each `start_time` must be the sum of all previous durations (no floating-point errors).
-6. Keep narration human, clear, and simple. Every segment must describe the animation shown.
+            5. Each `start_time` must be the sum of all previous durations (no floating-point errors).
+            6. Keep narration human, clear, and simple. Every segment must describe the animation shown.
 
-==================
-🎬 MANIM CODE RULES
-==================
+            ==================
+            🎬 MANIM CODE RULES
+            ==================
 
---- IMPORTS ---
-• Use ONLY this import (no aliases, no other modules):
-```python
-from manim import *
-```
+            --- IMPORTS ---
+            • Use ONLY this import (no aliases, no other modules):
+            ```python
+            from manim import *
+            ```
 
---- CLASS & STRUCTURE ---
-• Class name must be: `GeneratedAnimation`
-• Define helper functions where appropriate (e.g., `create_table()`)
-• Script must run without edits in Manim v0.19.0
+            --- CLASS & STRUCTURE ---
+            • Class name must be: `GeneratedAnimation`
+            • Define helper functions where appropriate (e.g., `create_table()`)
+            • Script must run without edits in Manim v0.19.0
 
---- ALLOWED OBJECTS ---
-✅ Use only these built-in Manim mobjects:
-- Text
-- Rectangle, Circle, Line, Arrow, DashedLine
-- VGroup, Group
-- Table (only if correctly used)
-❌ DO NOT use:
-- SVGMobject, Checkmark, Cross, or custom symbols
-- External files (.svg, .png, etc.)
+            --- ALLOWED OBJECTS ---
+            ✅ Use only these built-in Manim mobjects:
+            - Text
+            - Rectangle, Circle, Line, Arrow, DashedLine
+            - VGroup, Group
+            - Table (only if correctly used)
+            ❌ DO NOT use:
+            - SVGMobject, Checkmark, Cross, or custom symbols
+            - External files (.svg, .png, etc.)
 
---- TEXT RULES ---
-1. Every `Text(...)` must use this format exactly:
-```python
-Text("Some Text", font_size=min(N, 36), color=COLOR)
-```
-• N must be a numeric value ≤ 36 (e.g., 28, 32)
-• Do NOT pass other named arguments inside `min(...)` (e.g., `min(32, 36, width=7.0)` is INVALID)
-• Use colors like: BLUE, GREEN, RED, YELLOW, WHITE
+            --- TEXT RULES ---
+            1. Every `Text(...)` must use this format exactly:
+            ```python
+            Text("Some Text", font_size=min(N, 36), color=COLOR)
+            ```
+            • N must be a numeric value ≤ 36 (e.g., 28, 32)
+            • Do NOT pass other named arguments inside `min(...)` (e.g., `min(32, 36, width=7.0)` is INVALID)
+            • Use colors like: BLUE, GREEN, RED, YELLOW, WHITE
 
-2. NEVER let text overlap or overflow.
-• Prefer shorter text and use `next_to()` for spacing.
-• Maximum of 2–3 elements on screen at once.
+            2. NEVER let text overlap or overflow.
+            • Prefer shorter text and use `next_to()` for spacing.
+            • Maximum of 2–3 elements on screen at once.
 
---- POSITIONING RULES ---
-• Never use:
-```python
-mobject.move_to(position, buff=...)
-```
-• Instead, always separate position and buffer:
-```python
-element.move_to(position)
-element.next_to(other_element, direction, buff=0.3)
-```
+            --- POSITIONING RULES ---
+            • Never use:
+            ```python
+            mobject.move_to(position, buff=...)
+            ```
+            • Instead, always separate position and buffer:
+            ```python
+            element.move_to(position)
+            element.next_to(other_element, direction, buff=0.3)
+            ```
 
---- TABLE RULES ---
-• Use this helper function definition for all tables:
-```python
-def create_table(headers: List[str], data: List[List[str]], title_text: str) -> VGroup:
-```
-• Only use the built-in `Table` class properly.
-• Each row must be the same length (no ragged data).
-• Never use keyword arguments like `include_header_line` unless confirmed supported.
+            --- TABLE RULES ---
+            • Use this helper function definition for all tables:
+            ```python
+            def create_table(headers: List[str], data: List[List[str]], title_text: str) -> VGroup:
+            ```
+            • Only use the built-in `Table` class properly.
+            • Each row must be the same length (no ragged data).
+            • Never use keyword arguments like `include_header_line` unless confirmed supported.
 
---- ANIMATION SYNC ---
-• Use `self.wait(duration)` after every animation to match narration segment.
-• Duration must match narration segment duration exactly.
-• Use `FadeOut(...)` before adding new content to avoid overlap.
-• Avoid long animation chains unless necessary.
+            --- ANIMATION SYNC ---
+            • Use `self.wait(duration)` after every animation to match narration segment.
+            • Duration must match narration segment duration exactly.
+            • Use `FadeOut(...)` before adding new content to avoid overlap.
+            • Avoid long animation chains unless necessary.
 
---- CODING SAFETY RULES ---
-• Donot use argument include_header in MObjects __init__ methods
-• NEVER perform math on strings (e.g., `"5" ** 2` is invalid)
-• Always use `int(...)` or `float(...)` before math ops.
-• Do NOT use unsupported `min(...)` with extra args (e.g., width, height)
-• Do NOT use `**kwargs` with classes unless verified.
-• All durations passed to `self.wait()` must be ≥ 0.1
-• Avoid calling attributes like `.center`, `.height`, `.width` — use `.get_center()`, etc.
+            --- CODING SAFETY RULES ---
+            • Donot use argument include_header in MObjects __init__ methods
+            ⚠️ Never use `element.move_to(..., buff=...)` — this will cause a crash in Manim.
+            ✅ Instead:
+            - Use `element.move_to(POSITION)` to place at an absolute position
+            - Use `element.next_to(other_mobject, DIRECTION, buff=...)` for relative positioning with spacing
+            • NEVER perform math on strings (e.g., `"5" ** 2` is invalid)
+            • Always use `int(...)` or `float(...)` before math ops.
+            • Do NOT use unsupported `min(...)` with extra args (e.g., width, height)
+            • Do NOT use `**kwargs` with classes unless verified.
+            • All durations passed to `self.wait()` must be ≥ 0.1
+            • Avoid calling attributes like `.center`, `.height`, `.width` — use `.get_center()`, etc.
 
-==================
-✅ OUTPUT FORMAT (MUST FOLLOW)
-==================
+            ==================
+            ✅ OUTPUT FORMAT (MUST FOLLOW)
+            ==================
 
----NARRATION---
-SEGMENT: start | duration | narration text
-SEGMENT: ...
+            ---NARRATION---
+            SEGMENT: start | duration | narration text
+            SEGMENT: ...
 
----MANIM---
-from manim import *
+            ---MANIM---
+            from manim import *
 
-class GeneratedAnimation(Scene):
-    def construct(self):
-        # Manim animation code here
+            class GeneratedAnimation(Scene):
+                def construct(self):
+                    # Manim animation code here
 
-==================
-IF YOU BREAK ANY RULE ABOVE, THE SCRIPT WILL FAIL TO EXECUTE.
-==================
+            ==================
+            IF YOU BREAK ANY RULE ABOVE, THE SCRIPT WILL FAIL TO EXECUTE.
+            ==================
 
-Be clean, strict, and follow instructions with full accuracy.
-
-                    """)
+            Be clean, strict, and follow instructions with full accuracy.
+            """)
+        except Exception as e:
+            print(f"⚠️ Gemini content generation failed: {e}")
+        try:
             print("=" * 60)
             print("AI: Content generation response received")
             print(response.text)
@@ -1309,7 +1286,7 @@ def main():
         print("\n⚡ Quick Test Video Generation")
         print("-" * 30)
         
-        topic = "3NF and 4NF normalisation techniques in database management system"
+        topic = "Operations performed on a B+ Tree"
         voice = "teacher"
         
         print(f"📚 Topic: {topic}")
