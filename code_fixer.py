@@ -181,7 +181,7 @@ class TargetedCodeFixer:
         else:
             params += ", font_size=24"
         
-        # Add width if not present
+        # Add width if not present``
         if "width=" not in params:
             params += ", width=7.0"
         
@@ -235,6 +235,7 @@ Fixed:
     
     def fix_file_with_error(self, file_path, error_msg, return_fixed_code=False, overwrite_original=False):
         """Fix a file based on error message, optionally return fixed code."""
+        logging.info(f"Fixing file: {file_path} for error: {error_msg}")
         file_path = Path(file_path)
         if not file_path.exists():
             logging.error(f"File not found: {file_path}")
@@ -287,7 +288,7 @@ Fixed:
                     f.write(fixed_full_code)
             
             if return_fixed_code:
-                return fixed_full_code, str(output_file)
+                return fixed_full_code
             return str(output_file)
         except Exception as e:
             logging.error(f"Error saving fixed file: {e}")

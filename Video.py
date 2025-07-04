@@ -1115,19 +1115,15 @@ class GeneratedAnimation(Scene):
                     fixed_result = self.code_fixer.fix_file_with_error(str(script_path), error_msg, return_fixed_code=True)
                     
                     if fixed_result and fixed_result[0] is not None:
-                        fixed_code, fixed_file_path = fixed_result
+                        fixed_code   = fixed_result
                         print(f"✅ Script fixed successfully")
                         
                         # Update manim_script with the fixed code for next iteration
                         manim_script = fixed_code
                         
                         # Clean up the temporary fixed file if it exists and is different from our main file
-                        if fixed_file_path and Path(fixed_file_path).exists() and Path(fixed_file_path) != script_path:
-                            try:
-                                Path(fixed_file_path).unlink()
-                                print(f"🗑️ Removed temporary fixed script: {fixed_file_path}")
-                            except Exception as e:
-                                print(f"⚠️ Could not remove temporary fixed script {fixed_file_path}: {e}")
+                        with open(script_path, 'w', encoding='utf-8') as f:
+                            json.dump(fixed_code, f, indent=2, ensure_ascii=False)
                         
                         # Continue to next iteration with the fixed code
                         continue
