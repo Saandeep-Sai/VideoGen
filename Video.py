@@ -17,9 +17,10 @@ from pydub.utils import mediainfo
 import threading
 import sys
 import logging
+from code_fixer import TargetedCodeFixer  # Import the TargetedCodeFixer
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 
 # Fix Windows encoding issues
 if sys.platform == "win32":
@@ -35,6 +36,7 @@ except ImportError:
     CHATTERBOX_AVAILABLE = False
 
 load_dotenv()
+
 class EnhancedVideoGenerator:
     """
     Enhanced automated video generation system with local Chatterbox-TTS integration
@@ -67,6 +69,7 @@ class EnhancedVideoGenerator:
         
         self.tts_model = None
         self.tts_available = False
+        self.code_fixer = TargetedCodeFixer()  # Initialize the code fixer
         
         if CHATTERBOX_AVAILABLE:
             self._initialize_tts()
@@ -399,128 +402,95 @@ class EnhancedVideoGenerator:
         return str(audio_path)
     
     def fix_manim_script(self, script: str) -> str:
+        """Clean up common issues in Manim scripts while preserving proper indentation."""
         logging.info("🧹 Starting Manim script cleanup...")
 
-        # ✅ Fix list slice animate color set
-        script = re.sub(
-            r'rects\[(.*?)\:(.*?)\]\.animate\.set_color\((.*?)\)',
-            r'[rect.animate.set_color(\3) for rect in rects[\1:\2]]',
-            script
-        )
-        script = re.sub(
-            r'^[ \t]{12,}(.*)$',   # lines indented more than 12 spaces (3+ tabs or 12+ spaces)
-            r'        \1',         # reduce indent to 8 spaces (typical inside def construct)
-            script,
-            flags=re.MULTILINE
-        )
-
-        # ✅ Fix broken inline if-else list comprehensions
-        script = re.sub(
-            r"self\.play\(\*\[FadeOut\(obj\) for obj in \[(.*?)\] if 'success_text' in locals\(\) else \[(.*?)\]\]\)",
-            r"objects_to_fade = [\1] if 'success_text' in locals() else [\2]\n        self.play(*[FadeOut(obj) for obj in objects_to_fade])",
-            script
-        )
-
-        # ✅ Replace Checkmark with ✓, Cross with ✗
-        script = re.sub(r'Checkmark\(.*?color\s*=\s*([^)]+)\)', r'Text("✓", color=\1, font_size=48)', script)
-        script = re.sub(r'Cross\(.*?\)', r'Text("✗", font_size=48)', script)
-
-        # ✅ Replace SVGMobject
-        script = re.sub(r'SVGMobject\("([^"]+)"\)\.scale\((.*?)\)', r'Rectangle(width=2, height=2, color=WHITE, fill_opacity=0.5).scale(\2)', script)
-        script = re.sub(r'SVGMobject\("([^"]+)"\)', r'Rectangle(width=2, height=2, color=WHITE, fill_opacity=0.5)', script)
-
-        # ✅ Fix move_to(..., buff=...) → move_to(...) + next_to(..., buff)
-        script = re.sub(r'(\w+)\.move_to\(([^,]+),\s*buff\s*=\s*([^)]+)\)', r'\1.move_to(\2)\n\1.next_to(\2, buff=\3)', script)
-
-        # ✅ Fix .to_edge(...) → .move_to(... * 0.9)
-        script = re.sub(r'\.to_edge\((.*?)\)', r'.move_to(\1 * 0.9)', script)
-
-        # ✅ Fix .shift(... * N) cap
-        script = re.sub(r'\.shift\((.*?)\s*\*\s*([\d.]+)\)', lambda m: f'.shift({m.group(1)} * min({m.group(2)}, 3.0))', script)
-
-        # ✅ Replace wrong directions (RIGTH → RIGHT, UPP → UP)
-        wrong_dirs = {'RIGTH': 'RIGHT', 'LEFFT': 'LEFT', 'UPP': 'UP', 'DOWNN': 'DOWN'}
-        for wrong, correct in wrong_dirs.items():
-            script = re.sub(rf'\b{wrong}\b', correct, script)
-
-        # ✅ Fix .wait(...) with invalid times
-        script = re.sub(
-            r'self\.wait\((.*?)\)',
-            lambda m: f'self.wait({max(float(m.group(1)), 0.1)})' if m.group(1).replace('.', '', 1).isdigit() else m.group(0),
-            script
-        )
-
-        # ✅ Fix Table(...) include_header
-        script = re.sub(r'Table\((.*?)include_header\s*=\s*True\s*,?', r'Table(\1', script)
-
-        # ✅ Remove width inside min()
-        script = re.sub(r'min\(\s*([0-9.]+)\s*,\s*36\s*,\s*width\s*=\s*[0-9.]+\s*\)', r'min(\1, 36)', script)
-
-        # ✅ Ensure font_size capped and width added
-        script = re.sub(
-            r'Text\((.*?),\s*font_size\s*=\s*(\d+\.?\d*)\s*(.*?)\)',
-            lambda m: f'Text({m.group(1)}, font_size=min({m.group(2)}, 36){m.group(3)})',
-            script
-        )
-        # ✅ Remove width argument from min() if present
-        script = re.sub(
-            r'min\(([^)]*?),\s*width\s*=\s*[^,)]+(,[^)]*)?\)',
-            lambda m: f"min({','.join([p for p in m.group(1).split(',') if 'width=' not in p])}, 36)",
-            script
-        )
-
-        # ✅ Inject width=7.0 if not present after font_size=min(...)
-        script = re.sub(
-            r'Text\((.*?),\s*font_size\s*=\s*min\((\d+\.?\d*),\s*36\)(.*?)\)',
-            r'Text(\1, font_size=min(\2, 36), width=7.0\3)', script)
-
-        # ✅ Add width and font_size if missing
-        script = re.sub(
-            r'Text\(([^)]*?)\)',
-            lambda m: (
-                m.group(0)
-                if 'font_size=' in m.group(1) and 'width=' in m.group(1)
-                else (
-                    f'Text({m.group(1)}, font_size=min(32, 36), width=7.0)'
-                    if 'font_size=' not in m.group(1)
-                    else f'Text({m.group(1)}, width=7.0)'
+        # First, normalize all line endings
+        script = script.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Split into lines to work with indentation properly
+        lines = script.split('\n')
+        fixed_lines = []
+        
+        for line in lines:
+            original_line = line
+            
+            # Preserve leading whitespace (indentation)
+            leading_whitespace = len(line) - len(line.lstrip())
+            indent = line[:leading_whitespace]
+            content = line[leading_whitespace:]
+            
+            # Apply fixes to content only, not indentation
+            if content.strip():
+                # Fix list slice animate color set
+                content = re.sub(
+                    r'rects\[(.*?)\:(.*?)\]\.animate\.set_color\((.*?)\)',
+                    r'[rect.animate.set_color(\3) for rect in rects[\1:\2]]',
+                    content
                 )
-            ),
-            script
-        )
-
-        # ✅ Remove duplicate `width=` in Text()
-        def remove_duplicate_widths(match):
-            args = match.group(1)
-            parts = re.split(r',(?![^()]*\))', args)
-            width_indices = [i for i, p in enumerate(parts) if re.match(r'\s*width\s*=', p)]
-            if len(width_indices) > 1:
-                for idx in reversed(width_indices[:-1]):
-                    del parts[idx]
-            return f'Text({", ".join(parts)})'
-
-        script = re.sub(r'Text\(([^)]*width\s*=[^)]*)\)', remove_duplicate_widths, script)
-
-        # ✅ Replace fancy characters (Unicode → ASCII-safe)
-        replacements = {
-            "→": "->", "—": "--", "“": '"', "”": '"',
-            "‘": "'", "’": "'", "…": "...", "✓": "✓", "✗": "✗"
-        }
-        for k, v in replacements.items():
-            script = script.replace(k, v)
-
-        # ✅ Inject typing imports if missing
-        if "create_table(" in script and "from typing import" not in script:
-            script = "from typing import List, Any\n" + script# ✅ Fix color=" BLUE" → color=BLUE
+                
+                # Fix broken inline if-else list comprehensions
+                content = re.sub(
+                    r"self\.play\(\*\[FadeOut\(obj\) for obj in \[(.*?)\] if 'success_text' in locals\(\) else \[(.*?)\]\]\)",
+                    r"objects_to_fade = [\1] if 'success_text' in locals() else [\2]\n" + indent + "self.play(*[FadeOut(obj) for obj in objects_to_fade])",
+                    content
+                )
+                
+                # Replace problematic symbols
+                content = re.sub(r'Checkmark\(.*?color\s*=\s*([^)]+)\)', r'Text("✓", color=\1, font_size=48)', content)
+                content = re.sub(r'Cross\(.*?\)', r'Text("✗", font_size=48)', content)
+                content = re.sub(r'SVGMobject\("([^"]+)"\)\.scale\((.*?)\)', r'Rectangle(width=2, height=2, color=WHITE, fill_opacity=0.5).scale(\2)', content)
+                content = re.sub(r'SVGMobject\("([^"]+)"\)', r'Rectangle(width=2, height=2, color=WHITE, fill_opacity=0.5)', content)
+                
+                # Fix positioning issues
+                content = re.sub(r'(\w+)\.move_to\(([^,]+),\s*buff\s*=\s*([^)]+)\)', r'\1.move_to(\2)\n' + indent + r'\1.next_to(\2, buff=\3)', content)
+                content = re.sub(r'\.to_edge\((.*?)\)', r'.move_to(\1 * 0.9)', content)
+                content = re.sub(r'\.shift\((.*?)\s*\*\s*([\d.]+)\)', lambda m: f'.shift({m.group(1)} * min({m.group(2)}, 3.0))', content)
+                
+                # Fix direction typos
+                wrong_dirs = {'RIGTH': 'RIGHT', 'LEFFT': 'LEFT', 'UPP': 'UP', 'DOWNN': 'DOWN'}
+                for wrong, correct in wrong_dirs.items():
+                    content = re.sub(rf'\b{wrong}\b', correct, content)
+                
+                # Fix Text formatting issues - be more careful with this regex
+                content = re.sub(
+                    r'Text\((.*?),\s*font_size\s*=\s*(\d+\.?\d*)\s*(.*?)\)',
+                    lambda m: f'Text({m.group(1)}, font_size=min({m.group(2)}, 36){m.group(3)})',
+                    content
+                )
+                
+                # Remove problematic width parameters from Text objects
+                content = re.sub(r'Text\((.*?),\s*width\s*=\s*[\d.]+\s*(.*?)\)', r'Text(\1\2)', content)
+                
+                # Add proper spacing after commas in function calls (but not in strings)
+                # This is a simple approach - you might need a more sophisticated parser for complex cases
+                content = re.sub(r',(?! )(?![^"]*"[^"]*$)', r', ', content)
+            
+            # Reconstruct the line with original indentation
+            fixed_line = indent + content if content.strip() else original_line
+            fixed_lines.append(fixed_line)
         
-        script = re.sub(r'color\s*=\s*["\']\s*(BLUE|RED|GREEN|WHITE|BLACK|YELLOW|ORANGE)\s*["\']', r'color=\1', script)
-
+        # Join lines back together
+        script = '\n'.join(fixed_lines)
         
-
-        logging.info("✅ Manim script cleanup complete.")
+        # Clean up any double spaces that might have been introduced (but not at line starts)
+        lines = script.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            if line.strip():  # Only clean non-empty lines
+                leading_whitespace = len(line) - len(line.lstrip())
+                indent = line[:leading_whitespace]
+                content = line[leading_whitespace:]
+                # Clean up double spaces in content only
+                cleaned_content = re.sub(r'  +', ' ', content)
+                cleaned_lines.append(indent + cleaned_content)
+            else:
+                cleaned_lines.append(line)  # Keep empty lines as-is
+        
+        script = '\n'.join(cleaned_lines)
+        
+        logging.info("✅ Manim script cleanup complete with preserved indentation.")
         return script
-
-
     def suggest_voice_for_topic(self, topic: str, level: str = "beginner") -> str:
         """Suggest the best voice configuration for a given topic and level."""
         topic_lower = topic.lower()
@@ -693,7 +663,7 @@ class EnhancedVideoGenerator:
             raise
     
     def generate_content_alternative(self, topic: str, duration: int = 180, 
-                                   level: str = "beginner", language: str = "English") -> Dict:
+                                level: str = "beginner", language: str = "English") -> Dict:
         """
         Generate synchronized Manim script and narration segments for a given topic.
         """
@@ -730,7 +700,7 @@ class EnhancedVideoGenerator:
             SEGMENT: start_time | duration | narration text
 
             (Example)
-            SEGMENT: 0 | 6 | [Confident] Let’s explore the basics of Third Normal Form.
+            SEGMENT: 0 | 6 | [Confident] Let's explore the basics of Third Normal Form.
             SEGMENT: 6 | 4 | [Curious] Why is normalization important in databases?
 
             5. Each `start_time` must be the sum of all previous durations (no floating-point errors).
@@ -801,7 +771,7 @@ class EnhancedVideoGenerator:
             • Avoid long animation chains unless necessary.
 
             --- CODING SAFETY RULES ---
-            • Donot use argument include_header in MObjects __init__ methods
+            • Do not use argument include_header in MObjects __init__ methods
             ⚠️ Never use `element.move_to(..., buff=...)` — this will cause a crash in Manim.
             ✅ Instead:
             - Use `element.move_to(POSITION)` to place at an absolute position
@@ -812,6 +782,49 @@ class EnhancedVideoGenerator:
             • Do NOT use `**kwargs` with classes unless verified.
             • All durations passed to `self.wait()` must be ≥ 0.1
             • Avoid calling attributes like `.center`, `.height`, `.width` — use `.get_center()`, etc.
+            
+            --Sample Code---
+            from manim import *
+            
+            class GeneratedAnimation(Scene):
+                def construct(self):
+                    title = Text("{topic}", font_size=36, color=BLUE)
+                    title.move_to(UP * 3.5)
+                    self.play(Write(title))
+                    self.wait(2)
+                    
+                    intro_text = Text("Let's learn about {topic.lower()}", font_size=32, color=WHITE)
+                    intro_text.move_to(ORIGIN)
+                    self.play(Write(intro_text))
+                    self.wait(3)
+                    
+                    content_rect = Rectangle(width=8, height=4, color=GREEN, fill_opacity=0.1)
+                    content_rect.move_to(ORIGIN)
+                    self.play(Create(content_rect))
+                    self.wait(2)
+                    
+                    concept1 = Text("Key Concept 1", font_size=24, color=YELLOW)
+                    concept1.move_to(UP * 1)
+                    self.play(Write(concept1))
+                    self.wait(2)
+                    
+                    concept2 = Text("Key Concept 2", font_size=24, color=YELLOW)
+                    concept2.move_to(ORIGIN)
+                    self.play(Write(concept2))
+                    self.wait(2)
+                    
+                    concept3 = Text("Key Concept 3", font_size=24, color=YELLOW)
+                    concept3.move_to(DOWN * 1)
+                    self.play(Write(concept3))
+                    self.wait(2)
+                    
+                    summary = Text("Summary: Understanding {topic}", font_size=28, color=GREEN)
+                    summary.move_to(DOWN * 3.5)
+                    self.play(Write(summary))
+                    self.wait(3)
+                    
+                    self.play(*[FadeOut(mob) for mob in self.mobjects])
+                    self.wait(1)
 
             ==================
             ✅ OUTPUT FORMAT (MUST FOLLOW)
@@ -836,52 +849,100 @@ class EnhancedVideoGenerator:
             """)
         except Exception as e:
             print(f"⚠️ Gemini content generation failed: {e}")
+            
         try:
             print("=" * 60)
             print("AI: Content generation response received")
-            print(response.text)
+            print("AI: Response length:", len(response.text))
             content = response.text.strip()
             
             if "---MANIM---" not in content or "---NARRATION---" not in content:
                 raise ValueError("Response format incorrect")
             
-            manim_script = content.split("---MANIM---")[1].split("---NARRATION---")[0].strip()
-            narration_block = content.split("---NARRATION---")[1].strip()
+            # Split the content properly
+            content_parts = content.split("---MANIM---")
+            if len(content_parts) < 2:
+                raise ValueError("MANIM section not found")
             
-            if manim_script.startswith("```"):
-                manim_script = manim_script[manim_script.find('\n') + 1:]
-            if manim_script.endswith("```"):
-                manim_script = manim_script[:manim_script.rfind("```")]
+            # Get the part after ---MANIM---
+            manim_part = content_parts[1]
+            
+            # If there's a ---NARRATION--- section, split it out
+            if "---NARRATION---" in manim_part:
+                manim_script = manim_part.split("---NARRATION---")[0].strip()
+                narration_block = manim_part.split("---NARRATION---")[1].strip()
+            else:
+                # If narration comes first, get it from the first part
+                manim_script = manim_part.strip()
+                narration_block = content_parts[0].split("---NARRATION---")[1].strip() if "---NARRATION---" in content_parts[0] else ""
 
-            print(manim_script)
+            # Clean up code block markers but preserve indentation
+            if manim_script.startswith("```python"):
+                # Find the first newline after ```python
+                first_newline = manim_script.find('\n')
+                if first_newline != -1:
+                    manim_script = manim_script[first_newline + 1:]
+            elif manim_script.startswith("```"):
+                # Find the first newline after ```
+                first_newline = manim_script.find('\n')
+                if first_newline != -1:
+                    manim_script = manim_script[first_newline + 1:]
+            
+            if manim_script.endswith("```"):
+                # Remove the ending ``` but keep everything else
+                last_backticks = manim_script.rfind("```")
+                if last_backticks != -1:
+                    manim_script = manim_script[:last_backticks]
+
+            # Ensure proper imports and class name
             if "from manim import *" not in manim_script:
                 manim_script = "from manim import *\n\n" + manim_script
+            
+            # Fix class name if needed
             if "class GeneratedAnimation" not in manim_script:
                 manim_script = manim_script.replace("class ", "class GeneratedAnimation", 1)
             
+            # Debug: Print the extracted script to see if indentation is preserved
+            print("DEBUG: Extracted Manim script:")
+            print("=" * 40)
+            print(manim_script)
+            print("=" * 40)
+            
+            # Parse narration segments
             narration_segments = []
             current_time = 0.0
+            
             for line in narration_block.splitlines():
+                line = line.strip()
                 if line.startswith("SEGMENT:"):
                     try:
-                        parts = line[8:].split('|')
-                        duration_seg = float(parts[1].strip())
-                        text = parts[2].strip()
-                        narration_segments.append({
-                            "start_time": current_time,
-                            "duration": duration_seg,
-                            "text": text
-                        })
-                        current_time += duration_seg
+                        # Remove "SEGMENT:" and split by "|"
+                        segment_content = line[8:].strip()
+                        parts = segment_content.split('|')
+                        if len(parts) >= 3:
+                            start_time = float(parts[0].strip())
+                            duration_seg = float(parts[1].strip())
+                            text = parts[2].strip()
+                            
+                            narration_segments.append({
+                                "start_time": start_time,
+                                "duration": duration_seg,
+                                "text": text
+                            })
+                            current_time = start_time + duration_seg
                     except (ValueError, IndexError) as e:
                         print(f"⚠️ Skipping invalid narration segment: {line}, error: {e}")
                         continue
             
             if not narration_segments:
-                raise ValueError("No valid narration segments parsed")
+                print("⚠️ No valid narration segments found, using fallback")
+                narration_segments = self._generate_basic_narration(topic, duration)
+            
+            # Clean up the Manim script
             print("🔧 Cleaning up Manim script...")
             manim_script = self.fix_manim_script(manim_script)
             
+            # Adjust narration duration if needed
             total_duration = sum(segment["duration"] for segment in narration_segments)
             if abs(total_duration - duration) > 1.0:
                 print(f"⚠️ Adjusting narration duration from {total_duration}s to {duration}s")
@@ -914,8 +975,7 @@ class EnhancedVideoGenerator:
                     "level": level,
                     "language": language
                 }
-            }
-    
+            }   
     def _generate_basic_manim_script(self, topic: str) -> str:
         """Generate a basic Manim script as fallback with text constraints."""
         return f'''from manim import *
@@ -977,8 +1037,8 @@ class GeneratedAnimation(Scene):
         return segments
     
     def create_manim_video(self, manim_script: str, class_name: str = "GeneratedAnimation",
-                          quality: str = "high", output_filename: str = "generated_video.mp4") -> str:
-        """Create Manim video from script."""
+                      quality: str = "high", output_filename: str = "generated_video.mp4") -> str:
+        """Create Manim video from script with error handling and code fixing."""
         print("🎬 Creating Manim video...")
         
         quality_flags = {
@@ -989,65 +1049,110 @@ class GeneratedAnimation(Scene):
         }
         
         script_path = self.output_dir / "temp_animation.py"
-        try:
-            if script_path.exists():
-                try:
-                    script_path.unlink()
-                    print(f"🗑️  Removed existing script file: {script_path}")
-                except Exception as e:
-                    print(f"⚠️  Could not remove existing script file {script_path}: {e}")
-            
-            with open(script_path, 'w',encoding='utf-8') as f:
-                f.write(manim_script)
-            
-            quality_flag = quality_flags.get(quality, "-qh")
-            
-            cmd = [
-                "manim", quality_flag, "--disable_caching",
-                "temp_animation.py", class_name
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.output_dir))
-            
-            if result.returncode != 0:
-                print(f"⚠️ Manim command failed with output: {result.stderr}")
-                raise RuntimeError(f"Manim failed: {result.stderr}")
-            
-            media_dir = self.output_dir / "media" / "videos" / "temp_animation"
-            
-            for quality_dir in media_dir.glob("*"):
-                if quality_dir.is_dir():
-                    for video_file in quality_dir.glob(f"{class_name}.mp4"):
-                        final_path = self.output_dir / output_filename
-                        if final_path.exists():
-                            try:
-                                final_path.unlink()
-                                print(f"🗑️  Removed existing video file: {final_path}")
-                            except Exception as e:
-                                print(f"⚠️  Could not remove existing video file {final_path}: {e}")
-                        video_file.rename(final_path)
-                        print(f"✅ Video created: {final_path}")
-                        return str(final_path)
-            
-            raise FileNotFoundError("Generated video file not found")
+        max_retries = 3  # Maximum number of retries for fixing errors
         
-        finally:
+        for attempt in range(max_retries):
+            print(f"🛠️ Attempt {attempt + 1}/{max_retries} to execute Manim script")
+            
             try:
+                # Write/overwrite the script file with current version
                 if script_path.exists():
-                    script_path.unlink()
+                    try:
+                        script_path.unlink()
+                        print(f"🗑️ Removed existing script file: {script_path}")
+                    except Exception as e:
+                        print(f"⚠️ Could not remove existing script file {script_path}: {e}")
+                
+                with open(script_path, 'w', encoding='utf-8') as f:
+                    f.write(manim_script)
+                
+                quality_flag = quality_flags.get(quality, "-qh")
+                
+                cmd = [
+                    "manim", quality_flag, "--disable_caching",
+                    "temp_animation.py", class_name
+                ]
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.output_dir))
+                except Exception as e:
+                    logging.info(f"⚠️ Error occurred while running Manim command: {e}")    
+                
+                if result.returncode == 0:
+                    # Success! Find and move the video file
+                    media_dir = self.output_dir / "media" / "videos" / "temp_animation"
+                    
+                    for quality_dir in media_dir.glob("*"):
+                        if quality_dir.is_dir():
+                            for video_file in quality_dir.glob(f"{class_name}.mp4"):
+                                final_path = self.output_dir / output_filename
+                                if final_path.exists():
+                                    try:
+                                        final_path.unlink()
+                                        print(f"🗑️ Removed existing video file: {final_path}")
+                                    except Exception as e:
+                                        print(f"⚠️ Could not remove existing video file {final_path}: {e}")
+                                video_file.rename(final_path)
+                                print(f"✅ Video created: {final_path}")
+                                
+                                # Clean up temporary script
+                                try:
+                                    if script_path.exists():
+                                        script_path.unlink()
+                                except Exception as e:
+                                    print(f"⚠️ Could not delete temp script: {e}")
+                                
+                                return str(final_path)
+                
+                else:
+                    # Error occurred, try to fix it
+                    print(f"⚠️ Manim command failed with output: {result.stderr}")
+                    error_msg = result.stderr
+                    
+                    # Use TargetedCodeFixer to fix the script IN-PLACE
+                    print(f"🔧 Attempting to fix script errors...")
+                    
+                    # Get the fixed code and overwrite the original file
+                    fixed_result = self.code_fixer.fix_file_with_error(str(script_path), error_msg, return_fixed_code=True)
+                    
+                    if fixed_result and fixed_result[0] is not None:
+                        fixed_code, fixed_file_path = fixed_result
+                        print(f"✅ Script fixed successfully")
+                        
+                        # Update manim_script with the fixed code for next iteration
+                        manim_script = fixed_code
+                        
+                        # Clean up the temporary fixed file if it exists and is different from our main file
+                        if fixed_file_path and Path(fixed_file_path).exists() and Path(fixed_file_path) != script_path:
+                            try:
+                                Path(fixed_file_path).unlink()
+                                print(f"🗑️ Removed temporary fixed script: {fixed_file_path}")
+                            except Exception as e:
+                                print(f"⚠️ Could not remove temporary fixed script {fixed_file_path}: {e}")
+                        
+                        # Continue to next iteration with the fixed code
+                        continue
+                    else:
+                        print(f"❌ Failed to fix script errors")
+                        if attempt == max_retries - 1:
+                            raise RuntimeError(f"Manim failed after {max_retries} attempts: {error_msg}")
+            
             except Exception as e:
-                print(f"⚠️ Could not delete temp script: {e}")
+                print(f"⚠️ Error during Manim execution: {e}")
+                if attempt == max_retries - 1:
+                    raise RuntimeError(f"Manim failed after {max_retries} attempts: {str(e)}")
+        
+        raise FileNotFoundError("Generated video file not found after all retries")
     
     def combine_video_audio(self, video_path: str, audio_path: str, output_path: str) -> str:
         """Combine video and audio using FFmpeg."""
-        print("🎞️  Combining video and audio...")
+        print("🎞️ Combining video and audio...")
         
         if os.path.exists(output_path):
             try:
                 os.remove(output_path)
-                print(f"🗑️  Removed existing file: {output_path}")
+                print(f"🗑️ Removed existing file: {output_path}")
             except Exception as e:
-                print(f"⚠️  Could not remove existing file {output_path}: {e}")
+                print(f"⚠️ Could not remove existing file {output_path}: {e}")
         
         cmd = [
             "ffmpeg", "-y",
@@ -1080,13 +1185,13 @@ def demo_voice_selection():
     
     generator = EnhancedVideoGenerator(GEMINI_API_KEY)
     
-    print("🎙️  VOICE SELECTION DEMO")
+    print("🎙️ VOICE SELECTION DEMO")
     print("=" * 50)
     
     generator.list_voices()
     
     if not generator.tts_available:
-        print("\n⚠️  TTS not available - skipping voice demos")
+        print("\n⚠️ TTS not available - skipping voice demos")
         print("📦 To enable TTS, install: pip install chatterbox-tts")
         return
     
@@ -1258,11 +1363,11 @@ def main():
         
         topic = input("\n📚 Enter topic: ") or "Stack Data Structure"
         
-        print(f"\n🎙️  Available voices: teacher, professor, guide, narrator, expert")
-        voice = input("🎙️  Enter voice name (or press Enter for auto-suggestion): ").strip() or None
+        print(f"\n🎙️ Available voices: teacher, professor, guide, narrator, expert")
+        voice = input("🎙️ Enter voice name (or press Enter for auto-suggestion): ").strip() or None
         
         try:
-            duration = int(input("⏱️  Enter duration in seconds (default: 60): ") or "60")
+            duration = int(input("⏱️ Enter duration in seconds (default: 60): ") or "60")
         except ValueError:
             duration = 60
         
@@ -1290,8 +1395,8 @@ def main():
         voice = "teacher"
         
         print(f"📚 Topic: {topic}")
-        print(f"🎙️  Voice: {voice}")
-        print(f"⏱️  Duration: 180 seconds")
+        print(f"🎙️ Voice: {voice}")
+        print(f"⏱️ Duration: 180 seconds")
         print(f"🎥 Quality: medium")
         
         try:

@@ -10,3 +10,6 @@ media/
 generated_videos/
 pycache/
 __pycache__/
+fixed_scripts.py
+test_fixed.py
+test.py
